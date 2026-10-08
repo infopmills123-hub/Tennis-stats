@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pick Ledger</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b1120;
+    --panel: #162033;
+    --line: #2b3850;
+    --text: #edf2fa;
+    --muted: #aab8cf;
+    --accent: #58dab4;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 16px system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  main { max-width: 1000px; margin: auto; padding: 24px 16px; }
+  h1 { margin-bottom: 4px; }
+  p { color: var(--muted); line-height: 1.5; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 18px;
+    margin-top: 18px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+    gap: 14px;
+  }
+  label { display: block; color: var(--muted); font-size: 14px; }
+  input, select, button {
+    width: 100%;
+    padding: 12px;
+    margin-top: 7px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+  }
+  button {
+    cursor: pointer;
+    background: var(--accent);
+    color: #09251d;
+    font-weight: 700;
+  }
+  button.secondary { background: var(--line); color: var(--text); }
+  button.delete { background: #502530; color: #ffd6de; }
+  .stat span { font-size: 13px; color: var(--muted); }
+  .stat strong { display: block; margin-top: 7px; font-size: 24px; }
+  .positive { color: #58dab4; }
+  .negative { color: #ff8d99; }
+  .pick {
+    border-top: 1px solid var(--line);
+    padding: 16px 0;
+  }
+  .pick:first-child { border-top: none; }
+  .pick h3 { margin: 0 0 6px; overflow-wrap: anywhere; }
+  .meta { color: var(--muted); font-size: 14px; line-height: 1.6; }
+  .actions {
+    display: grid;
+    grid-template-columns: 1fr 100px;
+    gap: 10px;
+    max-width: 340px;
+    margin-top: 8px;
+  }
+  #message { min-height: 20px; color: #ffb3bd; }
+  .wide { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pick Ledger</h1>
+  <p>Your sports picks, results, and bankroll in one place.</p>
+
+  <section class="panel">
+    <label for="startingBankroll">Starting bankroll ($)</label>
+    <input id="startingBankroll" type="number"
+           min="0" step="0.01" inputmode="decimal">
+    <p>Saved on this browser only. Export a backup before clearing browser data.</p>
+  </section>
+
+  <section class="panel grid" id="stats"></section>
+
+  <section class="panel">
+    <h2>Add a pick</h2>
+    <form id="pickForm" class="grid">
+      <label class="wide">
+        Pick
+        <input id="pickName" maxlength="160"
+               placeholder="Example: Dodgers moneyline" required>
+      </label>
+
+      <label>
+        Sport
+        <select id="sport">
+          <option>MLB</option>
+          <option>NBA</option>
+          <option>WNBA</option>
+          <option>NFL</option>
+          <option>NCAAF</option>
+          <option>NCAAB</option>
+          <option>Tennis</option>
+          <option>Soccer</option>
+          <option>NHL</option>
+          <option>Esports</option>
+          <option>Other</option>
+        </select>
+      </label>
+
+      <label>
+        American odds
+        <input id="odds" type="number" step="1"
+               placeholder="-110 or +150" required>
+      </label>
+
+      <label>
+        Stake ($)
+        <input id="stake" type="number" min="0.01"
+               step="0.01" inputmode="decimal" required>
+      </label>
+
+      <label>
+        Date
+        <input id="pickDate" type="date" required>
+      </label>
+
+      <button class="wide" type="submit">Add pick</button>
+    </form>
+    <div id="message" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Your picks</h2>
+    <div class="grid">
+      <label>
+        Filter by sport
+        <select id="sportFilter">
+          <option value="">All sports</option>
+        </select>
+      </label>
+      <label>
+        Filter by date
+        <input id="dateFilter" type="date">
+      </label>
+      <button type="button" class="secondary" id="clearFilters">
+        Clear filters
+      </button>
+      <button type="button" class="secondary" id="export">
+        Export backup
+      </button>
+    </div>
+    <p>Dashboard totals include all picks, regardless of filters.</p>
+    <div id="pickList"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const STORAGE_KEY = "pick-ledger-v1";
+const $ = id => document.getElementById(id);
+const currency = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD"
+});
+
+let state = { startingBankroll: 0, picks: [] };
+
+try {
+  const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+  if (
+    saved &&
+    Number.isFinite(saved.startingBankroll) &&
+    saved.startingBankroll >= 0 &&
+    Array.isArray(saved.picks)
+  ) {
+    state.startingBankroll = saved.startingBankroll;
+    state.picks = saved.picks.filter(p =>
+      p &&
+      typeof p.id === "string" &&
+      typeof p.name === "string" &&
+      typeof p.sport === "string" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(p.date) &&
+      Number.isInteger(p.odds) &&
+      Math.abs(p.odds) >= 100 &&
+      Number.isFinite(p.stake) &&
+      p.stake > 0 &&
+      ["pending", "win", "loss", "push"].includes(p.status)
+    );
+  }
+} catch {
+  $("message").textContent =
+    "Saved data could not be loaded. You can still add new picks.";
+}
+
+function localDate() {
+  const d = new Date();
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, "0"),
+    String(d.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function roundMoney(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function winProfit(pick) {
+  return roundMoney(
+    pick.odds > 0
+      ? pick.stake * pick.odds / 100
+      : pick.stake * 100 / Math.abs(pick.odds)
+  );
+}
+
+function netProfit(pick) {
+  if (pick.status === "win") return winProfit(pick);
+  if (pick.status === "loss") return -pick.stake;
+  return 0;
+}
+
+function save() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
+  } catch {
+    $("message").textContent =
+      "Could not save to this browser. Export a backup to keep your picks.";
+    return false;
+  }
+}
+
+function stat(label, value, className = "") {
+  const box = document.createElement("div");
+  box.className = "stat";
+
+  const heading = document.createElement("span");
+  heading.textContent = label;
+
+  const amount = document.createElement("strong");
+  amount.textContent = value;
+  amount.className = className;
+
+  box.append(heading, amount);
+  return box;
+}
+
+function renderStats() {
+  const profit = roundMoney(
+    state.picks.reduce((sum, p) => sum + netProfit(p), 0)
+  );
+  const pending = roundMoney(
+    state.picks
+      .filter(p => p.status === "pending")
+      .reduce((sum, p) => sum + p.stake, 0)
+  );
+  const settledStake = state.picks
+    .filter(p => p.status !== "pending")
+    .reduce((sum, p) => sum + p.stake, 0);
+
+  const wins = state.picks.filter(p => p.status === "win").length;
+  const losses = state.picks.filter(p => p.status === "loss").length;
+  const decisions = wins + losses;
+  const balance = roundMoney(state.startingBankroll + profit);
+
+  $("stats").replaceChildren(
+    stat("Bankroll", currency.format(balance)),
+    stat("Available after pending stakes", currency.format(balance - pending)),
+    stat("Net profit", currency.format(profit),
+      profit >= 0 ? "positive" : "negative"),
+    stat("Pending stakes", currency.format(pending)),
+    stat("Win rate (excludes pushes)",
+      decisions ? `${(wins / decisions * 100).toFixed(1)}%` : "—"),
+    stat("ROI (all settled stakes)",
+      settledStake ? `${(profit / settledStake * 100).toFixed(1)}%` : "—")
+  );
+}
+
+function renderSportFilter() {
+  const current = $("sportFilter").value;
+  const sports = [...new Set(state.picks.map(p => p.sport))].sort();
+
+  $("sportFilter").replaceChildren(new Option("All sports", ""));
+  sports.forEach(sport => $("sportFilter").add(new Option(sport, sport)));
+
+  $("sportFilter").value = sports.includes(current) ? current : "";
+}
+
+function renderPicks() {
+  const selectedSport = $("sportFilter").value;
+  const selectedDate = $("dateFilter").value;
+
+  const picks = state.picks
+    .filter(p => !selectedSport || p.sport === selectedSport)
+    .filter(p => !selectedDate || p.date === selectedDate)
+    .slice()
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  $("pickList").replaceChildren();
+
+  if (!picks.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "No picks to display.";
+    $("pickList").append(empty);
+    return;
+  }
+
+  picks.forEach(pick => {
+    const card = document.createElement("article");
+    card.className = "pick";
+
+    const title = document.createElement("h3");
+    title.textContent = pick.name;
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const oddsText = pick.odds > 0 ? `+${pick.odds}` : String(pick.odds);
+    meta.textContent =
+      `${pick.sport} • ${pick.date} • ${oddsText} • ` +
+      `Stake: ${currency.format(pick.stake)}`;
+
+    const result = document.createElement("p");
+    const profit = netProfit(pick);
+    result.textContent = pick.status === "pending"
+      ? `Potential net profit: ${currency.format(winProfit(pick))}`
+      : `Net result: ${currency.format(profit)}`;
+    if (pick.status !== "pending") {
+      result.className = profit < 0 ? "negative" : "positive";
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const status = document.createElement("select");
+    status.setAttribute("aria-label", `Result for ${pick.name}`);
+    [
+      ["pending", "Pending"],
+      ["win", "Win"],
+      ["loss", "Loss"],
+      ["push", "Push / void"]
+    ].forEach(([value, label]) => status.add(new Option(label, value)));
+    status.value = pick.status;
+    status.addEventListener("change", () => {
+      pick.status = status.value;
+      save();
+      render();
+    });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "delete";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", () => {
+      if (!confirm(`Delete "${pick.name}"?`)) return;
+      state.picks = state.picks.filter(p => p.id !== pick.id);
+      save();
+      render();
+    });
+
+    actions.append(status, remove);
+    card.append(title, meta, result, actions);
+    $("pickList").append(card);
+  });
+}
+
+function render() {
+  renderStats();
+  renderSportFilter();
+  renderPicks();
+}
+
+$("startingBankroll").value = state.startingBankroll;
+$("pickDate").value = localDate();
+
+$("startingBankroll").addEventListener("change", () => {
+  const amount = Number($("startingBankroll").value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    $("startingBankroll").value = state.startingBankroll;
+    return;
+  }
+  state.startingBankroll = roundMoney(amount);
+  save();
+  renderStats();
+});
+
+$("pickForm").addEventListener("submit", event => {
+  event.preventDefault();
+  $("message").textContent = "";
+
+  const name = $("pickName").value.trim();
+  const odds = Number($("odds").value);
+  const stake = Number($("stake").value);
+  const date = $("pickDate").value;
+
+  if (!name) {
+    $("message").textContent = "Enter a pick name.";
+    return;
+  }
+  if (!Number.isInteger(odds) || Math.abs(odds) < 100) {
+    $("message").textContent =
+      "Use American odds of +100 or higher, or -100 or lower.";
+    return;
+  }
+  if (!Number.isFinite(stake) || stake <= 0) {
+    $("message").textContent = "Enter a stake greater than zero.";
+    return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    $("message").textContent = "Choose a valid date.";
+    return;
+  }
+
+  state.picks.push({
+    id: globalThis.crypto?.randomUUID?.() ||
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    name,
+    sport: $("sport").value,
+    odds,
+    stake: roundMoney(stake),
+    date,
+    status: "pending"
+  });
+
+  const saved = save();
+  $("pickName").value = "";
+  $("odds").value = "";
+  $("stake").value = "";
+  if (saved) $("message").textContent = "Pick added.";
+  render();
+});
+
+$("sportFilter").addEventListener("change", renderPicks);
+$("dateFilter").addEventListener("change", renderPicks);
+
+$("clearFilters").addEventListener("click", () => {
+  $("sportFilter").value = "";
+  $("dateFilter").value = "";
+  renderPicks();
+});
+
+$("export").addEventListener("click", () => {
+  const blob = new Blob(
+    [JSON.stringify(state, null, 2)],
+    { type: "application/json" }
+  );
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `pick-ledger-backup-${localDate()}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+});
+
+render();
+</script>
+</body>
+</html>
